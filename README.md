@@ -4,6 +4,7 @@
 >     2. source llm_env/bin/activate
 >     3. pip install -r requirements.txt
 
+Версия Python: 3.13.5
 После необходимо скачать и перенести в директорию со скриптом датасет, на котором будет обучаться LLM. Например:
 
  - https://huggingface.co/datasets/SiberiaSoft/SiberianPersonaChat
