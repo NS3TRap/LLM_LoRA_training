@@ -1,29 +1,26 @@
-import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
+from peft import PeftModel
 
-model_name = "./my-lora-model"
+base_model = "Qwen/Qwen2.5-1.5B"
+lora_path = "./my-lora-model"   # путь к папке с adapter_model.bin
 
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-model = AutoModelForCausalLM.from_pretrained(model_name)
+tokenizer = AutoTokenizer.from_pretrained(base_model)
 
-model.eval()
+model = AutoModelForCausalLM.from_pretrained(
+    base_model,
+    torch_dtype="auto",
+    device_map="auto",
+)
+
+model = PeftModel.from_pretrained(model, lora_path)
 
 prompts = [
-    "Искусственный интеллект это",
-    "Нейронные сети работают потому что",
-    "Градиентный спуск используется для того чтобы",
+    "Искусственный интеллект — это",
+    "Обучение с учителем заключается в том, что",
+    "Квантовые компьютеры отличаются от классических тем, что",
 ]
-
 for prompt in prompts:
-    inputs = tokenizer(prompt, return_tensors="pt")
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_length=80,
-            temperature=0.7,
-            top_p=0.9,
-            do_sample=True,
-            pad_token_id=tokenizer.eos_token_id,
-        )
-    print("\nPROMPT:", prompt)
-    print("RESULT:", tokenizer.decode(outputs[0], skip_special_tokens=True))
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    outputs = model.generate(**inputs, max_new_tokens=200)
+    print(tokenizer.decode(outputs[0], skip_special_tokens=True))
+
