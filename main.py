@@ -2,19 +2,19 @@ import argparse
 import json
 import os
 from dataclasses import dataclass
-from typing import List, Dict, Optional
+from typing import List, Dict
 
 import torch
-from datasets import load_dataset, Dataset
+from datasets import Dataset
 from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM,
     Trainer,
     TrainingArguments,
-    DataCollatorWithPadding,
 )
 
 from peft import LoraConfig, get_peft_model, TaskType, PeftConfig, PeftModel
+
 
 # -------------------- Утилиты --------------------
 
@@ -23,14 +23,12 @@ def read_json_or_jsonl(path: str) -> List[Dict[str, str]]:
         text = f.read().strip()
         if not text:
             return []
-        # Попытка загрузить как JSON целиком (список)
         try:
             obj = json.loads(text)
             if isinstance(obj, list):
                 return obj
         except Exception:
             pass
-        # Иначе обрабатываем как JSONL
         items = []
         with open(path, 'r', encoding='utf-8') as fr:
             for line in fr:
@@ -45,48 +43,61 @@ def get_default_lora_targets(model_name: str) -> List[str]:
     mn = model_name.lower()
     if 'llama' in mn or 'alpaca' in mn:
         return ["q_proj", "k_proj", "v_proj", "o_proj"]
-    if 'gpt' in mn or 'dialo' in mn or 'gpt2' in mn:
-        # GPT2-подобные модели: attention и mlp
-        return ["c_attn", "c_proj", "c_fc", "c_ffn", "mlp"]
-    # По умолчанию — попробовать стандартные
-    return ["c_attn", "c_proj"]
+    if 'gpt2' in mn or 'gpt' in mn or 'dialo' in mn:
+        return ["c_attn", "c_proj", "c_fc", "c_ffn"]
+    return ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj']
 
 
 # -------------------- Подготовка данных --------------------
 
 def prepare_dataset(items: List[Dict[str, str]], tokenizer: AutoTokenizer, max_length: int = 512):
+    """
+    Корректно токенизируем prompt и response отдельно, собираем input_ids и labels
+    labels: -100 для токенов prompt (и sep), реальные id для токенов response
+    """
     records = []
 
-    sep = tokenizer.eos_token or tokenizer.sep_token or ""
+    if tokenizer.eos_token_id is not None:
+        sep_token_id = tokenizer.eos_token_id
+    else:
+        sep_token_id = None
 
     for it in items:
-        prompt = it.get('prompt', '')
-        response = it.get('response', '')
-        if prompt is None: prompt = ''
-        if response is None: response = ''
+        prompt = it.get('prompt', '') or ''
+        response = it.get('response', '') or ''
 
-        # Собираем последовательность: prompt + sep + response
-        full = prompt + (sep if sep else "\n") + response
+        enc_prompt = tokenizer(prompt, add_special_tokens=False)
+        enc_resp = tokenizer(response, add_special_tokens=False)
 
-        enc = tokenizer(full, truncation=True, max_length=max_length)
-        input_ids = enc['input_ids']
-        attention_mask = enc.get('attention_mask', [1] * len(input_ids))
+        prompt_ids = enc_prompt["input_ids"]
+        resp_ids = enc_resp["input_ids"]
 
-        # Токенизируем prompt отдельно, чтобы знать длину
-        enc_prompt = tokenizer(prompt + (sep if sep else "\n"), truncation=True, max_length=max_length)
-        prompt_len = len(enc_prompt['input_ids'])
+        if sep_token_id is not None:
+            input_ids = prompt_ids + [sep_token_id] + resp_ids
+            prompt_len = len(prompt_ids) + 1
+        else:
+            sep_enc = tokenizer("\n", add_special_tokens=False)
+            sep_ids = sep_enc["input_ids"]
+            input_ids = prompt_ids + sep_ids + resp_ids
+            prompt_len = len(prompt_ids) + len(sep_ids)
 
-        # Формируем labels: -100 для prompt части, реальные id для response
-        labels = [-100] * prompt_len + input_ids[prompt_len:]
-        # Если длины не совпадают — выравниваем
-        if len(labels) != len(input_ids):
-            # Обрезаем или дополняем labels
-            labels = labels[:len(input_ids)] + [-100] * max(0, len(input_ids) - len(labels))
+        input_ids = input_ids[-max_length:] if len(input_ids) > max_length else input_ids
+
+        if prompt_len > len(input_ids):
+            labels = [-100] * len(input_ids)
+        else:
+            labels = [-100] * prompt_len + input_ids[prompt_len:]
+            if len(labels) < len(input_ids):
+                labels = labels + [-100] * (len(input_ids) - len(labels))
+            elif len(labels) > len(input_ids):
+                labels = labels[:len(input_ids)]
+
+        attention_mask = [1] * len(input_ids)
 
         records.append({
-            'input_ids': input_ids,
-            'attention_mask': attention_mask,
-            'labels': labels,
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "labels": labels,
         })
 
     ds = Dataset.from_list(records)
@@ -99,16 +110,12 @@ class DataCollatorForCausalLMWithLabels:
     max_length: int = 512
 
     def __call__(self, features: List[Dict[str, List[int]]]) -> Dict[str, torch.Tensor]:
-
-        # 1. Собираем списки
         input_ids = [torch.tensor(f["input_ids"], dtype=torch.long) for f in features]
         attention_mask = [torch.tensor(f["attention_mask"], dtype=torch.long) for f in features]
         labels = [torch.tensor(f["labels"], dtype=torch.long) for f in features]
 
-        # 2. Находим max длину внутри батча
         max_len = max(x.size(0) for x in input_ids)
 
-        # 3. Паддим вручную
         def pad(tensor, pad_value):
             return torch.nn.functional.pad(
                 tensor,
@@ -116,7 +123,11 @@ class DataCollatorForCausalLMWithLabels:
                 value=pad_value
             )
 
-        input_ids = torch.stack([pad(x, self.tokenizer.pad_token_id) for x in input_ids])
+        pad_id = self.tokenizer.pad_token_id
+        if pad_id is None:
+            pad_id = self.tokenizer.eos_token_id if self.tokenizer.eos_token_id is not None else 0
+
+        input_ids = torch.stack([pad(x, pad_id) for x in input_ids])
         attention_mask = torch.stack([pad(x, 0) for x in attention_mask])
         labels = torch.stack([pad(x, -100) for x in labels])
 
@@ -126,14 +137,15 @@ class DataCollatorForCausalLMWithLabels:
             "labels": labels
         }
 
+
 def main():
     parser = argparse.ArgumentParser(description='Fine-tune causal LM with LoRA (PEFT)')
 
-    parser.add_argument('--model_name', type=str, default='gpt2', help='Название модели в HF (пример: gpt2, microsoft/DialoGPT-medium, facebook/llama-7b и т.д.)')
+    parser.add_argument('--model_name', type=str, default='gpt2', help='Название модели в HF (пример: gpt2, microsoft/DialoGPT-medium, Qwen/Qwen2.5-1.5B и т.д.)')
     parser.add_argument('--data_path', type=str, required=True, help='Путь к data.json или data.jsonl')
-    parser.add_argument('--output_dir', type=str, default='./fine-tuned-lora', help='Куда сохранить модель')
+    parser.add_argument('--output_dir', type=str, default='./fine-tuned-lora', help='Куда сохранить модель/адаптер')
     parser.add_argument('--per_device_train_batch_size', type=int, default=4)
-    parser.add_argument('--num_train_epochs', type=int, default=20)
+    parser.add_argument('--num_train_epochs', type=int, default=3)
     parser.add_argument('--learning_rate', type=float, default=2e-4)
     parser.add_argument('--max_length', type=int, default=512)
     parser.add_argument('--use_lora', action='store_true')
@@ -147,15 +159,21 @@ def main():
     torch.manual_seed(args.seed)
 
     print(f"Загрузка токенизатора и модели: {args.model_name}")
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
-    # Гарантируем наличие pad_token
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=True)
+
     if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+        if tokenizer.eos_token is not None:
+            tokenizer.pad_token = tokenizer.eos_token
+        else:
+            tokenizer.add_special_tokens({"pad_token": "[PAD]"})
 
-    # Загружаем модель
-    model = AutoModelForCausalLM.from_pretrained(args.model_name)
+    model = AutoModelForCausalLM.from_pretrained(args.model_name, torch_dtype=torch.float32)
+    try:
+        model.gradient_checkpointing_enable()
+    except Exception:
+        pass
+    model.config.use_cache = False
 
-    # Настройка LoRA
     if args.use_lora:
         target_modules = get_default_lora_targets(args.model_name)
         print(f"Используем target_modules для LoRA: {target_modules}")
@@ -170,12 +188,10 @@ def main():
         model = get_peft_model(model, lora_config)
         model.print_trainable_parameters()
 
-    # Читаем данные
     items = read_json_or_jsonl(args.data_path)
     if not items:
         raise SystemExit("Данные пусты или не удалось прочитать файл")
 
-    # Подготовка датасета
     ds = prepare_dataset(items, tokenizer, max_length=args.max_length)
     data_collator = DataCollatorForCausalLMWithLabels(tokenizer=tokenizer)
 
@@ -185,8 +201,9 @@ def main():
         num_train_epochs=args.num_train_epochs,
         learning_rate=args.learning_rate,
         logging_steps=10,
-        save_total_limit=3,
-        fp16=False,  # на CPU это недоступно
+        save_strategy="no",           # **не сохранять чекпоинты Trainer'а**
+        save_total_limit=1,
+        fp16=False,
         remove_unused_columns=False,
         push_to_hub=False,
         report_to=[],
@@ -202,20 +219,20 @@ def main():
     print("Начинаем обучение...")
     trainer.train()
 
-    print("Сохраняем модель...")
-    # Сохраняем основную модель и токенизатор
+    print("Сохраняем результат...")
     os.makedirs(args.output_dir, exist_ok=True)
-    # Если модель PEFT (LoRA), то используем save_pretrained
-    try:
-        # PeftModel имеет save_pretrained
+
+    # Если использовали LoRA: сохраняем ТОЛЬКО адаптер
+    if args.use_lora:
         model.save_pretrained(args.output_dir)
-    except Exception:
-        # Стандартный save
-        trainer.save_model(args.output_dir)
+        tokenizer.save_pretrained(args.output_dir)
+        print(f"Сохранён LoRA-адаптер и токенизатор в {args.output_dir}")
+    else:
+        model.save_pretrained(args.output_dir, safe_serialization=True)
+        tokenizer.save_pretrained(args.output_dir)
+        print(f"Сохранена полная модель и токенизатор в {args.output_dir}")
 
-    tokenizer.save_pretrained(args.output_dir)
-
-    print(f"Готово. Модель сохранена в {args.output_dir}")
+    print("Готово.")
 
 
 if __name__ == '__main__':
