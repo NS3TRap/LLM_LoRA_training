@@ -1,19 +1,21 @@
 **Перед использование данного скрипта:**
 
->     1. python3 -m venv llm_env
+>     1. python -m venv llm_env
 >     2. source llm_env/bin/activate
 >     3. pip install -r requirements.txt
 
 Версия Python: 3.13.5
+Лучше не устанавливать зависимости через requirements, так как можете столкнуться с проблемами по совместимости тех или иных пакетов. Например: torch с cuda версиями.
 После необходимо скачать и перенести в директорию со скриптом датасет, на котором будет обучаться LLM. Например:
 
  - https://huggingface.co/datasets/SiberiaSoft/SiberianPersonaChat
  - https://www.kaggle.com/datasets/grafstor/19-000-russian-poems/data
  - или свой
 
+Также стоит отметить, что main.py парсит в режиме Prompt-Responce! Если необходимо, чтобы нейронка просто обучалась на каком-то тексте, то перепишите часть кода в main.py.
 Далее есть 2 команды:
 
->  - python3 main.py --model_name Qwen/Qwen2.5-1.5B --data_path data.jsonl --output_dir ./my-lora-model
+>  - python3 main.py --model_name Qwen/Qwen2.5-1.5B --data_path data.jsonl --output_dir ./my-lora-model --use_lora
 >  - python3 test.py
 
 Параметры первой команды:
