@@ -1,24 +1,19 @@
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from peft import PeftModel
 
 base_model = "Qwen/Qwen2.5-1.5B"
-lora_path = "./my-lora-model"   # путь к папке с adapter_model.bin
 
 tokenizer = AutoTokenizer.from_pretrained(base_model)
 
-model = AutoModelForCausalLM.from_pretrained(
-    base_model,
-    torch_dtype="auto",
-    device_map="auto",
-)
+model = AutoModelForCausalLM.from_pretrained(base_model)
 
-model = PeftModel.from_pretrained(model, lora_path)
+def read_prompts(filename):
+    with open(filename, 'r') as file:
+        lines = file.readlines()
+        prompts = [line.strip() for line in lines]
+    return prompts
 
-prompts = [
-    "Искусственный интеллект — это",
-    "Обучение с учителем заключается в том, что",
-    "Квантовые компьютеры отличаются от классических тем, что",
-]
+prompts = read_prompts('test_questions.txt')
+
 for prompt in prompts:
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
     outputs = model.generate(**inputs, max_new_tokens=200)
