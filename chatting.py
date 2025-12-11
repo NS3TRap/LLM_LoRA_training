@@ -27,7 +27,8 @@ model = AutoModelForCausalLM.from_pretrained(
     torch_dtype="auto",
     device_map="auto",
 )
-
-model = PeftModel.from_pretrained(model, args.model_dir)
-
-chat(model, tokenizer)
+if args.model_dir != '':
+    model = PeftModel.from_pretrained(model, args.model_dir)
+    chat(model, tokenizer)
+else:
+    chat(model, tokenizer)
