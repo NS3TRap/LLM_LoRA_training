@@ -121,7 +121,7 @@ Prompt:
 До дообучения модель демонстрировала галлюцинации, вымышленные сущности и отсутствие привязки к лору игры. После применения LoRA дообучения ответы стали существенно более корректными с точки зрения фактов, игровой терминологии и практической полезности для анализа стратегической игры. Кроме того, наблюдается рост глубины описаний и снижение уровня абстрактных обобщений.
 
 ## 5 Код обучения
-
+### 5.1 Загрузка базовой модели
 ```
 model = AutoModelForCausalLM.from_pretrained( 
         args.model_name, 
@@ -129,7 +129,7 @@ model = AutoModelForCausalLM.from_pretrained(
         torch_dtype=torch.float16 
         )
 ```
-
+### 5.2 Настройка LoRA-конфигурации
 ```
 target_modules = get_default_lora_targets(args.model_name)
 print(f"Используем target_modules для LoRA: {target_modules}")
@@ -140,7 +140,7 @@ lora_config = LoraConfig(task_type=TaskType.CAUSAL_LM,
                          target_modules=target_modules,)
 model = get_peft_model(model, lora_config) model.print_trainable_parameters()
 ```
-
+### 5.3 Чтение датасета
 ```
 text = read_markdown(args.data_path)
 ds = prepare_markdown_dataset(text=text,
@@ -148,7 +148,7 @@ ds = prepare_markdown_dataset(text=text,
                               max_length=args.max_length )
 data_collator = DataCollatorForCausalLMWithLabels(tokenizer=tokenizer)
 ```
-
+### 5.4 Указание параметров обучения
 ```
 training_args = TrainingArguments(
               output_dir=args.output_dir,
@@ -164,7 +164,7 @@ training_args = TrainingArguments(
               report_to=[],
 )
 ```
-
+### 5.5 Инициализация Trainer
 ```
 trainer = Trainer(model=model,
                   args=training_args,
@@ -172,7 +172,7 @@ trainer = Trainer(model=model,
                   data_collator=data_collator,
 )
 ```
-
+### 5.5 Вызов начала обучения и сохранение результата
 ```
 print("Начинаем обучение...")
 trainer.train()
