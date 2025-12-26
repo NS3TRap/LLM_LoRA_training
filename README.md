@@ -159,6 +159,8 @@ print("Начинаем обучение...")
 trainer.train()
 print("Сохраняем результат...")
 os.makedirs(args.output_dir, exist_ok=True)
+model.save_pretrained(args.output_dir)
+tokenizer.save_pretrained(args.output_dir)
 ```
 
 ## Вывод
